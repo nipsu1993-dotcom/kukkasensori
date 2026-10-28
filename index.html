@@ -1,0 +1,193 @@
+
+<!doctype html>
+<html lang="fi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#66775a">
+  <title>Kukkasensori</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 620px;
+      margin: 0 auto;
+      padding: 22px;
+      background: #f4f1e8;
+      color: #293329;
+    }
+    h1 { margin-bottom: 6px; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 13px 18px;
+      background: #66775a;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .card {
+      background: white;
+      padding: 18px;
+      margin-top: 16px;
+      border-radius: 16px;
+    }
+    .values {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .value { font-size: 30px; font-weight: 650; }
+    canvas { width: 100%; height: 230px; }
+    #status { margin-top: 12px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Kukkasensori</h1>
+  <p>Kasvin kosteuden seuranta</p>
+
+  <button id="connect">Yhdistä sensoriin</button>
+  <div id="status">Ei yhdistetty</div>
+
+  <section class="card values">
+    <div>
+      <div>Kosteus</div>
+      <div class="value" id="moisture">--%</div>
+    </div>
+    <div>
+      <div>Lämpötila</div>
+      <div class="value" id="temperature">--°C</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Kosteushistoria</h2>
+    <canvas id="chart" width="560" height="230"></canvas>
+    <p id="historyInfo">Yhdistä sensori nähdäksesi historian.</p>
+  </section>
+
+<script>
+const SERVICE_UUID =
+  "7b2f0001-8d4a-4c3b-9a10-123456789abc";
+const DATA_UUID =
+  "7b2f0002-8d4a-4c3b-9a10-123456789abc";
+
+const statusEl = document.getElementById("status");
+const moistureEl = document.getElementById("moisture");
+const temperatureEl = document.getElementById("temperature");
+const historyInfo = document.getElementById("historyInfo");
+
+document.getElementById("connect").addEventListener("click", connect);
+
+async function connect() {
+  try {
+    if (!navigator.bluetooth) {
+      throw new Error(
+        "Web Bluetooth ei ole käytettävissä. Avaa sivu Androidin Chrome-selaimessa HTTPS-yhteydellä."
+      );
+    }
+
+    statusEl.textContent = "Valitse Kukkasensori…";
+
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: "Kukkasensori" }],
+      optionalServices: [SERVICE_UUID]
+    });
+
+    statusEl.textContent = "Yhdistetään…";
+
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    const characteristic =
+      await service.getCharacteristic(DATA_UUID);
+
+    const value = await characteristic.readValue();
+    const text = new TextDecoder().decode(value);
+    const data = JSON.parse(text);
+
+    moistureEl.textContent = data.moisture + "%";
+    temperatureEl.textContent =
+      data.temperature == null ? "--°C" : data.temperature + "°C";
+
+    drawChart(data.history || []);
+    historyInfo.textContent =
+      `${(data.history || []).length} mittausta · mittausväli noin 6 tuntia`;
+
+    statusEl.textContent = "Yhdistetty: " + device.name;
+
+    device.addEventListener("gattserverdisconnected", () => {
+      statusEl.textContent =
+        "Yhteys katkesi. Herätä sensori painikkeesta yhdistääksesi uudelleen.";
+    });
+  } catch (error) {
+    statusEl.textContent = "Yhteys epäonnistui: " + error.message;
+  }
+}
+
+function drawChart(history) {
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const left = 42, right = 12, top = 15, bottom = 34;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.font = "12px system-ui";
+  ctx.lineWidth = 1;
+
+  // Ruudukko ja prosenttiakseli
+  for (let percent = 0; percent <= 100; percent += 25) {
+    const y = top + (100 - percent) / 100 * (h - top - bottom);
+    ctx.strokeStyle = "#deded5";
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(w - right, y);
+    ctx.stroke();
+
+    ctx.fillStyle = "#555";
+    ctx.fillText(percent + "%", 4, y + 4);
+  }
+
+  if (!history.length) {
+    ctx.fillStyle = "#555";
+    ctx.fillText("Ei mittaustietoja", left + 20, h / 2);
+    return;
+  }
+
+  const plotWidth = w - left - right;
+  const plotHeight = h - top - bottom;
+
+  ctx.strokeStyle = "#66775a";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+
+  history.forEach((item, i) => {
+    const x = history.length === 1
+      ? left + plotWidth / 2
+      : left + i / (history.length - 1) * plotWidth;
+    const y = top + (100 - item.moisture) / 100 * plotHeight;
+
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+
+  ctx.stroke();
+
+  history.forEach((item, i) => {
+    const x = history.length === 1
+      ? left + plotWidth / 2
+      : left + i / (history.length - 1) * plotWidth;
+    const y = top + (100 - item.moisture) / 100 * plotHeight;
+
+    ctx.fillStyle = "#66775a";
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.fillStyle = "#555";
+  ctx.fillText("Vanhempi", left, h - 8);
+  ctx.fillText("Uusin", w - right - 35, h - 8);
+}
+</script>
+</body>
+</html>
