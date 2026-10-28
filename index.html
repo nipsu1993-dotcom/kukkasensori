@@ -7,62 +7,75 @@
   <meta name="theme-color" content="#66775a">
   <title>Kukkasensori</title>
   <style>
+    * { box-sizing: border-box; }
+
     body {
       font-family: system-ui, sans-serif;
-      max-width: 620px;
-      margin: 0 auto;
+      max-width: 680px;
+      margin: auto;
       padding: 22px;
-      background: #f4f1e8;
+      background: #f3f0e7;
       color: #293329;
     }
-    h1 { margin-bottom: 6px; }
+
+    h1 { margin-bottom: 4px; }
+    .sub { color: #687365; margin-top: 0; }
+
     button {
       border: 0;
       border-radius: 12px;
-      padding: 13px 18px;
+      padding: 14px 18px;
       background: #66775a;
       color: white;
       font-size: 16px;
       cursor: pointer;
     }
+
+    button:disabled { opacity: .55; }
+
     .card {
       background: white;
+      border-radius: 16px;
       padding: 18px;
       margin-top: 16px;
-      border-radius: 16px;
+      box-shadow: 0 2px 8px #00000008;
     }
+
     .values {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
+
     .value { font-size: 30px; font-weight: 650; }
-    canvas { width: 100%; height: 230px; }
+    .label { color: #687365; font-size: 14px; }
     #status { margin-top: 12px; font-size: 14px; }
+    canvas { width: 100%; height: 240px; display: block; }
+    .small { font-size: 13px; color: #687365; }
   </style>
 </head>
 <body>
   <h1>Kukkasensori</h1>
-  <p>Kasvin kosteuden seuranta</p>
+  <p class="sub">Kasvin kosteuden seuranta</p>
 
   <button id="connect">Yhdistä sensoriin</button>
-  <div id="status">Ei yhdistetty</div>
+  <div id="status">Herätä sensori painikkeesta ennen yhdistämistä.</div>
 
   <section class="card values">
     <div>
-      <div>Kosteus</div>
+      <div class="label">Mullan kosteus</div>
       <div class="value" id="moisture">--%</div>
     </div>
     <div>
-      <div>Lämpötila</div>
+      <div class="label">Lämpötila</div>
       <div class="value" id="temperature">--°C</div>
     </div>
   </section>
 
   <section class="card">
     <h2>Kosteushistoria</h2>
-    <canvas id="chart" width="560" height="230"></canvas>
-    <p id="historyInfo">Yhdistä sensori nähdäksesi historian.</p>
+    <canvas id="chart" width="600" height="260"></canvas>
+    <p id="historyInfo" class="small">Ei mittaustietoja vielä.</p>
   </section>
 
 <script>
@@ -72,54 +85,121 @@ const DATA_UUID =
   "7b2f0002-8d4a-4c3b-9a10-123456789abc";
 
 const statusEl = document.getElementById("status");
+const connectButton = document.getElementById("connect");
 const moistureEl = document.getElementById("moisture");
 const temperatureEl = document.getElementById("temperature");
 const historyInfo = document.getElementById("historyInfo");
 
-document.getElementById("connect").addEventListener("click", connect);
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function writeCommand(characteristic, command) {
+  const bytes = new TextEncoder().encode(command);
+
+  if (characteristic.writeValueWithResponse) {
+    await characteristic.writeValueWithResponse(bytes);
+  } else {
+    await characteristic.writeValue(bytes);
+  }
+
+  // ESP32 käsittelee komennon write-callbackissa.
+  await sleep(100);
+}
+
+async function readJson(characteristic) {
+  const value = await characteristic.readValue();
+  const text = new TextDecoder().decode(value).replace(/\0/g, "").trim();
+
+  if (!text) {
+    throw new Error("Sensori palautti tyhjän vastauksen.");
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Sensorin vastaus ei ole kelvollista JSON-dataa: " + text);
+  }
+}
+
+async function getResponse(characteristic, command) {
+  await writeCommand(characteristic, command);
+  return await readJson(characteristic);
+}
 
 async function connect() {
+  connectButton.disabled = true;
+
   try {
     if (!navigator.bluetooth) {
       throw new Error(
-        "Web Bluetooth ei ole käytettävissä. Avaa sivu Androidin Chrome-selaimessa HTTPS-yhteydellä."
+        "Web Bluetooth ei ole käytettävissä. Avaa sivu Androidin Chromessa HTTPS-yhteydellä."
       );
     }
 
-    statusEl.textContent = "Valitse Kukkasensori…";
+    statusEl.textContent = "Valitse Kukkasensori Bluetooth-listasta…";
 
     const device = await navigator.bluetooth.requestDevice({
       filters: [{ name: "Kukkasensori" }],
       optionalServices: [SERVICE_UUID]
     });
 
-    statusEl.textContent = "Yhdistetään…";
+    statusEl.textContent = "Yhdistetään sensoriin…";
 
     const server = await device.gatt.connect();
     const service = await server.getPrimaryService(SERVICE_UUID);
-    const characteristic =
-      await service.getCharacteristic(DATA_UUID);
+    const characteristic = await service.getCharacteristic(DATA_UUID);
 
-    const value = await characteristic.readValue();
-    const text = new TextDecoder().decode(value);
-    const data = JSON.parse(text);
+    statusEl.textContent = "Luetaan viimeisintä mittausta…";
 
-    moistureEl.textContent = data.moisture + "%";
+    const latest = await getResponse(characteristic, "latest");
+
+    if (typeof latest.moisture !== "number") {
+      throw new Error("Viimeisintä kosteusarvoa ei saatu.");
+    }
+
+    moistureEl.textContent = latest.moisture + "%";
     temperatureEl.textContent =
-      data.temperature == null ? "--°C" : data.temperature + "°C";
+      latest.temperature == null ? "--°C" : latest.temperature + "°C";
 
-    drawChart(data.history || []);
-    historyInfo.textContent =
-      `${(data.history || []).length} mittausta · mittausväli noin 6 tuntia`;
+    statusEl.textContent = "Haetaan mittaushistoriaa…";
 
-    statusEl.textContent = "Yhdistetty: " + device.name;
+    const countData = await getResponse(characteristic, "count");
+    const count = Number(countData.count);
+
+    if (!Number.isInteger(count) || count < 0 || count > 30) {
+      throw new Error("Sensorin ilmoittama historian pituus on virheellinen.");
+    }
+
+    const history = [];
+
+    for (let i = 0; i < count; i++) {
+      statusEl.textContent = `Haetaan mittausta ${i + 1}/${count}…`;
+
+      const row = await getResponse(characteristic, "row:" + i);
+
+      if (typeof row.moisture === "number") {
+        history.push(row);
+      }
+    }
+
+    drawChart(history);
+
+    historyInfo.textContent = history.length
+      ? `${history.length} mittausta · mittausväli 6 tuntia · vanhin ensin`
+      : "Historia on tyhjä. Ensimmäinen mittaus tallentuu seuraavalla mittauskerralla.";
+
+    statusEl.textContent = "Yhteys valmis: " + (device.name || "Kukkasensori");
 
     device.addEventListener("gattserverdisconnected", () => {
       statusEl.textContent =
-        "Yhteys katkesi. Herätä sensori painikkeesta yhdistääksesi uudelleen.";
+        "Bluetooth-yhteys katkesi. Herätä sensori painikkeesta yhdistääksesi uudelleen.";
     });
+
   } catch (error) {
-    statusEl.textContent = "Yhteys epäonnistui: " + error.message;
+    statusEl.textContent = "Virhe: " + error.message;
+  } finally {
+    connectButton.disabled = false;
   }
 }
 
@@ -128,66 +208,67 @@ function drawChart(history) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
-  const left = 42, right = 12, top = 15, bottom = 34;
+  const left = 45, right = 14, top = 16, bottom = 36;
 
   ctx.clearRect(0, 0, w, h);
   ctx.font = "12px system-ui";
-  ctx.lineWidth = 1;
 
-  // Ruudukko ja prosenttiakseli
-  for (let percent = 0; percent <= 100; percent += 25) {
-    const y = top + (100 - percent) / 100 * (h - top - bottom);
+  for (let p = 0; p <= 100; p += 25) {
+    const y = top + (100 - p) / 100 * (h - top - bottom);
+
     ctx.strokeStyle = "#deded5";
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(left, y);
     ctx.lineTo(w - right, y);
     ctx.stroke();
 
-    ctx.fillStyle = "#555";
-    ctx.fillText(percent + "%", 4, y + 4);
+    ctx.fillStyle = "#596354";
+    ctx.fillText(p + "%", 4, y + 4);
   }
 
   if (!history.length) {
-    ctx.fillStyle = "#555";
-    ctx.fillText("Ei mittaustietoja", left + 20, h / 2);
+    ctx.fillStyle = "#596354";
+    ctx.fillText("Ei mittauksia", left + 12, h / 2);
     return;
   }
 
-  const plotWidth = w - left - right;
-  const plotHeight = h - top - bottom;
+  const pw = w - left - right;
+  const ph = h - top - bottom;
+  const point = i => ({
+    x: history.length === 1
+      ? left + pw / 2
+      : left + i / (history.length - 1) * pw,
+    y: top + (100 - history[i].moisture) / 100 * ph
+  });
 
   ctx.strokeStyle = "#66775a";
   ctx.lineWidth = 3;
   ctx.beginPath();
 
   history.forEach((item, i) => {
-    const x = history.length === 1
-      ? left + plotWidth / 2
-      : left + i / (history.length - 1) * plotWidth;
-    const y = top + (100 - item.moisture) / 100 * plotHeight;
-
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    const p = point(i);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
   });
 
   ctx.stroke();
 
   history.forEach((item, i) => {
-    const x = history.length === 1
-      ? left + plotWidth / 2
-      : left + i / (history.length - 1) * plotWidth;
-    const y = top + (100 - item.moisture) / 100 * plotHeight;
-
+    const p = point(i);
     ctx.fillStyle = "#66775a";
     ctx.beginPath();
-    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
     ctx.fill();
   });
 
-  ctx.fillStyle = "#555";
-  ctx.fillText("Vanhempi", left, h - 8);
-  ctx.fillText("Uusin", w - right - 35, h - 8);
+  ctx.fillStyle = "#596354";
+  ctx.fillText("Vanhempi", left, h - 9);
+  ctx.fillText("Uusin", w - right - 34, h - 9);
 }
+
+connectButton.addEventListener("click", connect);
+drawChart([]);
 </script>
 </body>
 </html>
